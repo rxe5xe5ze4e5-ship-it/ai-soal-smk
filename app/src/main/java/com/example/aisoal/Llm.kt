@@ -12,9 +12,12 @@ object Llm {
     @Volatile var lastAnswer: String = ""
 
     private const val SYSTEM = "Kamu adalah asisten belajar untuk siswa SMK. " +
-        "Jawab dalam bahasa Indonesia. Selesaikan soal langkah demi langkah, " +
-        "tulis rumus yang dipakai, lalu periksa kembali hasil akhir sebelum menjawab. " +
-        "Jika kamu tidak yakin, katakan terus terang."
+        "Jawab dalam bahasa Indonesia, langsung ke langkah penyelesaian tanpa menyapa atau basa-basi. " +
+        "Selesaikan soal langkah demi langkah dengan ringkas, tulis rumus yang dipakai, lalu periksa kembali hasil akhirnya. " +
+        "Jangan gunakan format markdown atau LaTeX (jangan pakai tanda dolar, tanda bintang, atau garis miring terbalik). " +
+        "Tulis rumus dengan teks biasa, misalnya 2 + 2 x 2 = 6. " +
+        "Jika kamu tidak yakin, katakan terus terang. " +
+        "Akhiri jawabanmu dengan satu baris terakhir persis berformat: JAWABAN AKHIR: <jawaban singkat beserta satuan>"
 
     fun modelFile(ctx: Context) = File(ctx.filesDir, "model.litertlm")
 
