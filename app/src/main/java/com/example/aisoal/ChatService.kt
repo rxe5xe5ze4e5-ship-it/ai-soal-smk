@@ -16,7 +16,9 @@ class ChatService : Service() {
 
     companion object {
         const val CHANNEL = "ai_soal"
+        const val CHANNEL_RESULT = "ai_soal_jawaban"
         const val NOTIF_ID = 1
+        const val RESULT_ID = 2
         const val KEY_TEXT = "key_text"
         const val ACTION_ASK = "com.example.aisoal.ASK"
         const val ACTION_STOP = "com.example.aisoal.STOP"
@@ -31,6 +33,9 @@ class ChatService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "AI Soal SMK", NotificationManager.IMPORTANCE_LOW)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_RESULT, "Jawaban akhir", NotificationManager.IMPORTANCE_HIGH)
         )
     }
 
@@ -62,6 +67,25 @@ class ChatService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun clean(s: String): String =
+        s.replace("\\times", "×")
+            .replace("\\cdot", "×")
+            .replace("\\div", "÷")
+            .replace("\\(", "")
+            .replace("\\)", "")
+            .replace("\\[", "")
+            .replace("\\]", "")
+            .replace("\$", "")
+            .replace("**", "")
+
+    private fun extractFinal(text: String): String {
+        val m = Regex("JAWABAN AKHIR\\s*:?\\s*(.+)", RegexOption.IGNORE_CASE)
+            .findAll(text).lastOrNull()
+        val found = m?.groupValues?.get(1)?.trim()
+        if (!found.isNullOrEmpty()) return found
+        return text.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() } ?: ""
+    }
+
     private fun answer(q: String) {
         val sb = StringBuilder()
         show("Menjawab: $q")
@@ -72,16 +96,43 @@ class ChatService : Service() {
                 val now = System.currentTimeMillis()
                 if (now - lastUpdate > 800) {
                     lastUpdate = now
-                    show(sb.toString())
+                    show(clean(sb.toString()))
                 }
             },
             finished = {
-                val result = "Soal: $q\n\n" + sb.toString().ifEmpty { "(Tidak ada jawaban)" }
+                val text = clean(sb.toString())
+                var finalAnswer = extractFinal(text)
+                if (finalAnswer.isEmpty()) finalAnswer = "(tidak ada jawaban)"
+                val body = text.lines()
+                    .filterNot { it.trim().startsWith("JAWABAN AKHIR", ignoreCase = true) }
+                    .joinToString("\n")
+                    .trim()
+                val result = "Jawaban akhir: $finalAnswer\n\nSoal: $q\n\n$body"
                 Llm.lastAnswer = result
                 show(result)
+                showResult(finalAnswer, q)
             },
             failed = { t -> show("Gagal: ${t.message}") }
         )
+    }
+
+    private fun showResult(finalAnswer: String, q: String) {
+        val openPi = PendingIntent.getActivity(
+            this, 3,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = NotificationCompat.Builder(this, CHANNEL_RESULT)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Jawaban akhir")
+            .setContentText(finalAnswer)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("Soal: $q\n\nJawaban: $finalAnswer"))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setContentIntent(openPi)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(RESULT_ID, n)
     }
 
     private fun startAsForeground(text: String) {
