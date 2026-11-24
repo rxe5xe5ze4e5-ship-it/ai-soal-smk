@@ -1,7 +1,10 @@
 package com.example.aisoal
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.Button
@@ -9,28 +12,34 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.google.ai.edge.litertlm.*
 import java.io.File
 
 class MainActivity : Activity() {
 
-    private var engine: Engine? = null
-    private var conversation: Conversation? = null
     private lateinit var status: TextView
     private lateinit var answer: TextView
     private lateinit var input: EditText
     private lateinit var sendBtn: Button
 
     private val pickCode = 101
-    private val systemText = "Kamu adalah asisten belajar untuk siswa SMK. " +
-        "Jawab dalam bahasa Indonesia. Selesaikan soal langkah demi langkah, " +
-        "tulis rumus yang dipakai, lalu periksa kembali hasil akhir sebelum menjawab. " +
-        "Jika kamu tidak yakin, katakan terus terang."
-
-    private fun modelFile() = File(filesDir, "model.litertlm")
+    private val notifCode = 102
+    @Volatile private var copying = false
 
     private fun setStatus(text: String) {
         runOnUiThread { status.text = text }
+    }
+
+    private fun addButton(root: LinearLayout, label: String, action: () -> Unit) {
+        val b = Button(this)
+        b.text = label
+        b.setOnClickListener { action() }
+        root.addView(
+            b,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,26 +53,15 @@ class MainActivity : Activity() {
 
         status = TextView(this)
         status.textSize = 16f
-        status.text = if (modelFile().exists())
-            "Model sudah ada. Ketuk 'Muat model'."
-        else
-            "Belum ada model. Ketuk 'Pilih file model'."
+        status.text = "Menyiapkan..."
         root.addView(status, LinearLayout.LayoutParams(full, wrap))
 
-        val pickBtn = Button(this)
-        pickBtn.text = "Pilih file model"
-        pickBtn.setOnClickListener {
-            val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
-            i.addCategory(Intent.CATEGORY_OPENABLE)
-            i.type = "*/*"
-            startActivityForResult(i, pickCode)
+        addButton(root, "Pilih file model") { pickModel() }
+        addButton(root, "Muat model") { loadInBackground() }
+        addButton(root, "Aktifkan notifikasi AI") { enableNotif() }
+        addButton(root, "Matikan notifikasi AI") {
+            stopService(Intent(this, ChatService::class.java))
         }
-        root.addView(pickBtn, LinearLayout.LayoutParams(full, wrap))
-
-        val loadBtn = Button(this)
-        loadBtn.text = "Muat model"
-        loadBtn.setOnClickListener { loadModel() }
-        root.addView(loadBtn, LinearLayout.LayoutParams(full, wrap))
 
         input = EditText(this)
         input.hint = "Ketik soal di sini"
@@ -83,14 +81,52 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (Llm.lastAnswer.isNotEmpty() && answer.text.isEmpty()) {
+            answer.text = Llm.lastAnswer
+        }
+        loadInBackground()
+    }
+
+    private fun loadInBackground() {
+        if (copying) return
+        if (Llm.isReady()) {
+            setStatus("Model siap. Silakan ketik soal.")
+            return
+        }
+        if (!Llm.modelFile(this).exists()) {
+            setStatus("Belum ada model. Ketuk 'Pilih file model'.")
+            return
+        }
+        Thread {
+            try {
+                setStatus("Memuat model... bisa sampai satu menit.")
+                Llm.load(this)
+                setStatus("Model siap. Silakan ketik soal.")
+            } catch (t: Throwable) {
+                setStatus("Gagal memuat: ${t.message}")
+            }
+        }.start()
+    }
+
+    private fun pickModel() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "*/*"
+        startActivityForResult(i, pickCode)
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != pickCode || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
+        copying = true
         Thread {
             try {
                 setStatus("Menyalin model... mohon tunggu, jangan tutup aplikasi.")
+                Llm.unload()
                 val tmp = File(filesDir, "model.tmp")
                 var total = 0L
                 var lastShown = 0L
@@ -109,78 +145,59 @@ class MainActivity : Activity() {
                         }
                     }
                 }
-                modelFile().delete()
-                tmp.renameTo(modelFile())
-                setStatus("Model tersalin (${total / (1024 * 1024)} MB). Ketuk 'Muat model'.")
+                val target = Llm.modelFile(this)
+                target.delete()
+                tmp.renameTo(target)
+                copying = false
+                setStatus("Model tersalin (${total / (1024 * 1024)} MB). Memuat...")
+                loadInBackground()
             } catch (t: Throwable) {
+                copying = false
                 setStatus("Gagal menyalin: ${t.message}")
             }
         }.start()
     }
 
-    private fun loadModel() {
-        if (!modelFile().exists()) {
-            setStatus("Model belum dipilih.")
+    private fun enableNotif() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), notifCode)
             return
         }
-        Thread {
-            try {
-                setStatus("Memuat model... bisa sampai satu menit.")
-                conversation?.close()
-                conversation = null
-                engine?.close()
-                val e = Engine(
-                    EngineConfig(
-                        modelPath = modelFile().absolutePath,
-                        backend = Backend.CPU(),
-                        cacheDir = cacheDir.path
-                    )
-                )
-                e.initialize()
-                engine = e
-                setStatus("Model siap. Silakan ketik soal.")
-            } catch (t: Throwable) {
-                setStatus("Gagal memuat: ${t.message}")
+        startForegroundService(Intent(this, ChatService::class.java))
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == notifCode) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                startForegroundService(Intent(this, ChatService::class.java))
+            } else {
+                setStatus("Izin notifikasi ditolak. Aktifkan di Pengaturan aplikasi.")
             }
-        }.start()
+        }
     }
 
     private fun ask() {
-        val e = engine
-        if (e == null) {
-            setStatus("Model belum dimuat.")
-            return
-        }
-        val question = input.text.toString().trim()
-        if (question.isEmpty()) return
-        try {
-            conversation?.close()
-            val conv = e.createConversation(
-                ConversationConfig(
-                    systemInstruction = Contents.of(systemText),
-                    samplerConfig = SamplerConfig(topK = 20, topP = 0.9, temperature = 0.3)
-                )
-            )
-            conversation = conv
-            answer.text = ""
-            sendBtn.isEnabled = false
-            conv.sendMessageAsync(question, object : MessageCallback {
-                override fun onMessage(message: Message) {
-                    runOnUiThread { answer.append(message.toString()) }
+        val q = input.text.toString().trim()
+        if (q.isEmpty()) return
+        answer.text = ""
+        sendBtn.isEnabled = false
+        Llm.ask(
+            q,
+            chunk = { c -> runOnUiThread { answer.append(c) } },
+            finished = { runOnUiThread { sendBtn.isEnabled = true } },
+            failed = { t ->
+                runOnUiThread {
+                    answer.append("\n[Error: ${t.message}]")
+                    sendBtn.isEnabled = true
                 }
-                override fun onDone() {
-                    runOnUiThread { sendBtn.isEnabled = true }
-                }
-                override fun onError(throwable: Throwable) {
-                    runOnUiThread {
-                        answer.append("\n[Error: ${throwable.message}]")
-                        sendBtn.isEnabled = true
-                    }
-                }
-            })
-        } catch (t: Throwable) {
-            answer.text = "Gagal: ${t.message}"
-            sendBtn.isEnabled = true
-        }
+            }
+        )
     }
 }
