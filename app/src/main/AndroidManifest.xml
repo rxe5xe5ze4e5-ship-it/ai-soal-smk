@@ -22,10 +22,29 @@
         </activity>
 
         <activity
-            android:name=".AskActivity"
-            android:exported="false"
+            android:name=".ShareActivity"
+            android:label="Tanya AI Soal SMK"
+            android:exported="true"
             android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.DeviceDefault.Light.Dialog" />
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".ChatService"
