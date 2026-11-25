@@ -21,6 +21,7 @@ class ChatService : Service() {
         const val RESULT_ID = 2
         const val KEY_TEXT = "key_text"
         const val EXTRA_Q = "extra_q"
+        const val EXTRA_IMAGE = "extra_image"
         const val ACTION_ASK = "com.example.aisoal.ASK"
         const val ACTION_ASK_TEXT = "com.example.aisoal.ASK_TEXT"
         const val ACTION_STOP = "com.example.aisoal.STOP"
@@ -58,19 +59,29 @@ class ChatService : Service() {
             }
             ACTION_ASK, ACTION_ASK_TEXT -> {
                 stopped = false
-                val q: String? = if (action == ACTION_ASK_TEXT) {
-                    intent?.getStringExtra(EXTRA_Q)?.trim()
+                var q: String? = null
+                var img: String? = null
+                var imageProblem = false
+                if (action == ACTION_ASK_TEXT) {
+                    q = intent?.getStringExtra(EXTRA_Q)?.trim()
+                    img = intent?.getStringExtra(EXTRA_IMAGE)
                 } else if (intent != null) {
-                    RemoteInput.getResultsFromIntent(intent)
+                    q = RemoteInput.getResultsFromIntent(intent)
                         ?.getCharSequence(KEY_TEXT)?.toString()?.trim()
-                } else {
-                    null
+                    val data = RemoteInput.getDataResultsFromIntent(intent, KEY_TEXT)
+                    val uri = data?.entries?.firstOrNull { it.key.startsWith("image/") }?.value
+                    if (uri != null) {
+                        img = ImageUtil.save(this, uri)
+                        if (img == null) imageProblem = true
+                    }
                 }
                 startAsForeground("Menjawab...")
-                if (q.isNullOrEmpty()) {
-                    show("Ketik soal lewat tombol Tanya atau Soal panjang.")
+                if (imageProblem && q.isNullOrEmpty()) {
+                    show("Gambar tidak bisa dibaca dari kolom ini. Gunakan Bagikan → Tanya AI Soal SMK.")
+                } else if (q.isNullOrEmpty() && img == null) {
+                    show("Ketik soal lewat tombol Tanya, atau bagikan teks/gambar ke 'Tanya AI Soal SMK'.")
                 } else {
-                    answer(q.take(12000))
+                    answer((q ?: "").take(12000), img)
                 }
             }
             else -> {
@@ -79,7 +90,7 @@ class ChatService : Service() {
                 Thread {
                     try {
                         Llm.load(this)
-                        show("Model siap. Ketuk 'Tanya' untuk mengetik soal.")
+                        show(READY_TEXT)
                     } catch (t: Throwable) {
                         show("Gagal memuat: ${t.message}")
                     }
@@ -88,6 +99,9 @@ class ChatService : Service() {
         }
         return START_NOT_STICKY
     }
+
+    private val READY_TEXT =
+        "Model siap. Ketuk 'Tanya' untuk mengetik, atau bagikan teks/gambar ke 'Tanya AI Soal SMK'."
 
     private fun stopNow() {
         synchronized(lock) {
@@ -120,35 +134,52 @@ class ChatService : Service() {
         return text.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() } ?: ""
     }
 
-    private fun answer(q: String) {
+    private fun answer(q: String, img: String?) {
         val sb = StringBuilder()
-        val qShort = if (q.length > 120) q.take(120) + "…" else q
+        val prompt = if (q.isEmpty()) "Selesaikan soal pada gambar ini." else q
+        val shortText = if (prompt.length > 120) prompt.take(120) + "…" else prompt
+        val qShort = if (img != null) "[gambar] $shortText" else shortText
         show("Menjawab: $qShort")
-        Llm.ask(
-            q,
-            chunk = { c ->
-                sb.append(c)
-                val now = System.currentTimeMillis()
-                if (now - lastUpdate > 1200) {
-                    lastUpdate = now
-                    show(clean(sb.toString()))
+        Thread {
+            try {
+                if (!Llm.isReady() || (img != null && !Llm.hasVision())) {
+                    show(
+                        if (img != null) "Menyiapkan model dengan penglihatan... (bisa 1-2 menit)"
+                        else "Memuat model..."
+                    )
+                    Llm.load(this, img != null)
                 }
-            },
-            finished = {
-                val text = clean(sb.toString())
-                var finalAnswer = extractFinal(text)
-                if (finalAnswer.isEmpty()) finalAnswer = "(tidak ada jawaban)"
-                val body = text.lines()
-                    .filterNot { it.trim().startsWith("JAWABAN AKHIR", ignoreCase = true) }
-                    .joinToString("\n")
-                    .trim()
-                val result = "Jawaban akhir: $finalAnswer\n\nSoal: $qShort\n\n$body"
-                Llm.lastAnswer = result
-                show(result)
-                showResult(finalAnswer, qShort)
-            },
-            failed = { t -> show("Gagal: ${t.message}") }
-        )
+                show("Menjawab: $qShort")
+                Llm.ask(
+                    prompt,
+                    chunk = { c ->
+                        sb.append(c)
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdate > 1200) {
+                            lastUpdate = now
+                            show(clean(sb.toString()))
+                        }
+                    },
+                    finished = {
+                        val text = clean(sb.toString())
+                        var finalAnswer = extractFinal(text)
+                        if (finalAnswer.isEmpty()) finalAnswer = "(tidak ada jawaban)"
+                        val body = text.lines()
+                            .filterNot { it.trim().startsWith("JAWABAN AKHIR", ignoreCase = true) }
+                            .joinToString("\n")
+                            .trim()
+                        val result = "Jawaban akhir: $finalAnswer\n\nSoal: $qShort\n\n$body"
+                        Llm.lastAnswer = result
+                        show(result)
+                        showResult(finalAnswer, qShort)
+                    },
+                    failed = { t -> show("Gagal: ${t.message}") },
+                    imagePath = img
+                )
+            } catch (t: Throwable) {
+                show("Gagal: ${t.message}")
+            }
+        }.start()
     }
 
     private fun showResult(finalAnswer: String, q: String) {
@@ -190,7 +221,10 @@ class ChatService : Service() {
     }
 
     private fun build(text: String): Notification {
-        val remote = RemoteInput.Builder(KEY_TEXT).setLabel("Ketik soal").build()
+        val remote = RemoteInput.Builder(KEY_TEXT)
+            .setLabel("Ketik soal")
+            .setAllowDataType("image/*", true)
+            .build()
         val askPi = PendingIntent.getService(
             this, 0,
             Intent(this, ChatService::class.java).setAction(ACTION_ASK),
@@ -200,11 +234,6 @@ class ChatService : Service() {
             android.R.drawable.ic_menu_send, "Tanya", askPi
         ).addRemoteInput(remote).build()
 
-        val longPi = PendingIntent.getActivity(
-            this, 4,
-            Intent(this, AskActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         val stopPi = PendingIntent.getService(
             this, 1,
             Intent(this, ChatService::class.java).setAction(ACTION_STOP),
@@ -222,7 +251,6 @@ class ChatService : Service() {
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openPi)
             .addAction(askAction)
-            .addAction(android.R.drawable.ic_menu_edit, "Soal panjang", longPi)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Matikan", stopPi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
