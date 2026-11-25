@@ -10,13 +10,15 @@ object Llm {
 
     @Volatile var busy = false
     @Volatile var lastAnswer: String = ""
+    @Volatile private var unloadPending = false
 
     private const val SYSTEM = "Kamu adalah asisten belajar untuk siswa SMK. " +
-        "Jawab dalam bahasa Indonesia, langsung ke langkah penyelesaian tanpa menyapa atau basa-basi. " +
-        "Selesaikan soal langkah demi langkah dengan ringkas, tulis rumus yang dipakai, lalu periksa kembali hasil akhirnya. " +
+        "Jawab dalam bahasa Indonesia, langsung ke inti tanpa menyapa atau basa-basi. " +
+        "Secara default jawab SINGKAT: maksimal 5 baris berisi rumus dan langkah penting saja. " +
+        "Jika siswa meminta penjelasan atau langkah rinci, barulah jelaskan lebih panjang. " +
         "Jangan gunakan format markdown atau LaTeX (jangan pakai tanda dolar, tanda bintang, atau garis miring terbalik). " +
         "Tulis rumus dengan teks biasa, misalnya 2 + 2 x 2 = 6. " +
-        "Jika kamu tidak yakin, katakan terus terang. " +
+        "Jika kamu tidak yakin, atau hitungannya terlalu besar untuk dihitung dengan andal, katakan terus terang. " +
         "Akhiri jawabanmu dengan satu baris terakhir persis berformat: JAWABAN AKHIR: <jawaban singkat beserta satuan>"
 
     fun modelFile(ctx: Context) = File(ctx.filesDir, "model.litertlm")
@@ -45,6 +47,21 @@ object Llm {
         conversation = null
         engine?.close()
         engine = null
+    }
+
+    fun unloadWhenIdle() {
+        if (busy) {
+            unloadPending = true
+        } else {
+            Thread { unload() }.start()
+        }
+    }
+
+    private fun afterDone() {
+        if (unloadPending) {
+            unloadPending = false
+            Thread { unload() }.start()
+        }
     }
 
     fun ask(
@@ -79,10 +96,12 @@ object Llm {
                 override fun onDone() {
                     busy = false
                     finished()
+                    afterDone()
                 }
                 override fun onError(throwable: Throwable) {
                     busy = false
                     failed(throwable)
+                    afterDone()
                 }
             })
         } catch (t: Throwable) {
